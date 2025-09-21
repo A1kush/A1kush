@@ -1,0 +1,282 @@
+Here’s the clean, surgical plan to get your HTML build back to “playable + debuggable”, with boss reset, mob projectiles, DebugSkills v2.3 escalation, and the UI/DOM fixes you asked for.
+
+# Step-by-step patches (copy/paste ready)
+
+## 1) Close the Bag at startup (stop opening on Settings)
+
+**Why:** Your file ships with the bag drawer opened on the Settings tab, so the game always boots with the panel covering the playfield. In the markup it’s literally opened and the Settings tab is marked `active` .
+
+**Fixes:**
+
+* In HTML, find:
+
+```html
+<aside id="inventory" class="bag-overlay open">
+...
+<button class="bag-nav-item active" data-tab="settings">Settings</button>
+```
+
+Change to:
+
+```html
+<aside id="inventory" class="bag-overlay">
+...
+<button class="bag-nav-item" data-tab="settings">Settings</button>
+```
+
+* In JS (startup/init), ensure:
+
+```js
+st.bagOpen = false;
+closeBag(); // if called anywhere on load, keep it
+openBag('items'); // only when the player clicks Items
+```
+
+## 2) Hide the cluttered stat bars & unstick notifications
+
+**Why:** You wanted the old stat stack hidden and the toast list not to pile up.
+
+You already have a compact HUD + CSS that hides the legacy bars; keep that, and add a prune to the toast queue.
+
+**Patch `notify` helper:**
+
+```js
+function notify(msg, color){
+  const wrap = notifWrap();
+  const d = document.createElement('div');
+  d.className = 'toast';
+  if(color) d.style.color = color;
+  d.textContent = msg;
+  wrap.appendChild(d);
+
+  // NEW: prune to last 6 toasts
+  while (wrap.children.length > 6) wrap.firstChild.remove();
+
+  setTimeout(()=>{
+    d.style.transition = 'opacity .35s';
+    d.style.opacity = 0;
+    setTimeout(()=>d.remove(), 400);
+  }, 1400);
+}
+```
+
+## 3) Fix the `domSprites` null crash (clone bar parent)
+
+**Why:** Your error (“Cannot read properties of null (reading 'appendChild')”) happens when code tries to append to `#domSprites` before it exists. Sometimes the element isn’t in the document when a hook fires.
+
+**Safe parent helper:**
+
+```js
+function getDomSprites(){
+  let d = document.getElementById('domSprites');
+  if(!d){
+    d = document.createElement('div');
+    d.id = 'domSprites';
+    d.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none';
+    document.getElementById('wrap')?.appendChild(d) || document.body.appendChild(d);
+  }
+  return d;
+}
+// When adding clone bars or DOM sprites:
+getDomSprites().appendChild(someChild);
+```
+
+Note: `#domSprites` is already in your file near the core script; this guard simply prevents failures on timing or future refactors .
+
+## 4) Reset boss stats and guarantee despawn
+
+**Why:** “Boss HP goes down but they won’t disappear.” Also you asked to set boss to **HP 1000 / DEF 100 / ATK 100** (and keep Wave-10 as boss).
+
+**Boss spawn template:**
+
+```js
+function spawnBossForStage(){
+  const y = laneY(1);
+  const boss = {
+    id: 'boss_'+Date.now(),
+    kind: 'boss',
+    x: DESIGN_W + 80, y,
+    hp: 1000, max: 1000,
+    atk: 100, def: 100,
+    vx: -0.18, fireCD: 1200, behavior: 'boss_pattern',
+    rageTrigger: 0.35, rageMode: false, skillCD: 1500
+  };
+  st.enemies.push(boss);
+  st.bossAlive = true; st.bossHP = boss.hp; st.bossMax = boss.max;
+}
+```
+
+**Boss death & wave advance:**
+
+```js
+function onEnemyKilled(e){
+  // existing drops/xp/etc...
+  const idx = st.enemies.indexOf(e);
+  if (idx >= 0) st.enemies.splice(idx,1);
+
+  if(e.kind === 'boss'){
+    st.bossAlive = false;
+    st.bossHP = 0;
+
+    // Go to next stage after Wave 10 boss
+    if (st.wave === st.wavesPerStage) {
+      st.stage++; st.wave = 1;
+    } else {
+      st.wave++;
+    }
+    spawnWave();
+  }
+}
+```
+
+**Boss removal safety (in your main update loop):**
+
+```js
+for(const e of st.enemies){
+  if (e.hp <= 0) { onEnemyKilled(e); continue; }
+  // ...existing AI...
+}
+```
+
+## 5) Give mobs proper projectiles (shooters and occasional melee throw)
+
+**Why:** You asked for mobs to shoot. You already have `st.eShots` and a shooter role; this wires consistent bullet creation.
+
+**Bullet helper + usage:**
+
+```js
+function fireEnemyBullet(e, speed=320, dmg=14){
+  const L = leader(); if(!L) return;
+  const dx = (L.x - e.x), dy = (L.y - e.y);
+  const mag = Math.hypot(dx, dy) || 1;
+  st.eShots.push({
+    x: e.x - 18, y: e.y - 30,
+    vx: speed * (dx/mag), vy: speed * (dy/mag),
+    dmg, life: 2200, w: 24, h: 24, color:'#ffbb66'
+  });
+  e._justFired = true;
+}
+
+function tickEnemyShooting(e, dt){
+  e.fireCD = (e.fireCD ?? (800 + Math.random()*600)) - dt*1000;
+  if(e.fireCD <= 0){
+    const dmg = e.kind === 'boss' ? 26 : 12;
+    fireEnemyBullet(e, 360, dmg);
+    e.fireCD = (e.kind === 'boss' ? 600 : 1000) + Math.random()*400;
+  }
+}
+
+// in your enemy update:
+if (e.role === 'shooter') tickEnemyShooting(e, dt);
+// melee gets a rare throw:
+if (e.role === 'melee' && Math.random() < 0.003) fireEnemyBullet(e, 300, 10);
+```
+
+## 6) DebugSkills v2.3 (probe×3 → Secret (5s grace) → X-slash WaveKill)
+
+**Why:** Auto-unstick flow per your spec, with timers per wave and “stuck” detection when enemy HP pool is flat ≥1.5s.
+
+**Drop-in module:**
+
+```js
+const dbg = {
+  armed: true, waveStart: 0, step: 0,
+  tProbe: 0, probesFired: 0, lastHP: 0, stableT: 0,
+  unlockMin: 10000, unlockMax: 20000, hardcapMin: 30000, hardcapMax: 40000
+};
+function totalEnemyHP(){ return st.enemies.reduce((s,e)=>s+Math.max(0,e.hp),0); }
+function dbgWaveStart(){
+  dbg.waveStart = performance.now();
+  dbg.step = 0; dbg.tProbe = 0; dbg.probesFired = 0; dbg.lastHP = totalEnemyHP(); dbg.stableT = 0;
+}
+function dbgTick(dt){
+  if(!dbg.armed) return;
+
+  // Show allies & their projectiles while armed
+  st.players.forEach(p=>p._forceVisible=true);
+
+  // Stable HP detector (≥1.5s)
+  const hp = totalEnemyHP();
+  if (Math.abs(hp - dbg.lastHP) <= 0.01) { dbg.stableT += dt*1000; } else { dbg.stableT = 0; }
+  dbg.lastHP = hp;
+
+  const t = performance.now() - dbg.waveStart;
+  const unlock = dbg._unlock ??= (dbg.unlockMin + Math.random()*(dbg.unlockMax-dbg.unlockMin));
+  const hardcap = dbg._hardcap ??= (dbg.hardcapMin + Math.random()*(dbg.hardcapMax-dbg.hardcapMin));
+
+  // Step 0: after unlock window or if stuck → fire up to 3 probes (30 dmg homing)
+  if (dbg.step === 0 && (t >= unlock || dbg.stableT >= 1500)) {
+    if (dbg.probesFired < 3) {
+      fireHomingProbe(30); dbg.probesFired++; dbg.tProbe = performance.now();
+      if (dbg.probesFired >= 3) dbg.step = 1;
+    } else dbg.step = 1;
+  }
+  // Step 1: 5s grace Secret (A1 X1 costless) if still stuck
+  if (dbg.step === 1 && (dbg.stableT >= 1500 || (performance.now()-dbg.tProbe) >= 10000)) {
+    castA1SecretFree();
+    dbg.step = 2;
+    dbg._secretT = performance.now();
+  }
+  // Step 2: at hardcap or still stuck after Secret → red X VFX + WaveKill → nextWave
+  if (dbg.step <= 2 && (t >= hardcap || dbg.stableT >= 1500 || (performance.now()-dbg._secretT) >= 5000)) {
+    waveKillVFX();
+    st.enemies.slice().forEach(e=>{ e.hp = 0; onEnemyKilled(e); });
+    dbg.step = 3;
+  }
+}
+function fireHomingProbe(dmg){
+  const L = leader(); if(!L) return;
+  const e = st.enemies.find(x=>x.hp>0); if(!e) return;
+  const dx = e.x - L.x, dy = e.y - L.y, mag = Math.hypot(dx,dy)||1;
+  st.shots.push({ x:L.x+20,y:L.y-40, vx:420*(dx/mag), vy:420*(dy/mag), dmg, life:1600, homing:true, ownerId:'ally', color:'#ffaa00' });
+  notify('Debug Probe', '#ffaa00');
+}
+function castA1SecretFree(){
+  const a = st.players.find(p=>p.id==='A1' && !p.isDefeated); if(!a) return;
+  a.secretGauge = a.secretMax; a.hp = Math.max(1, a.hp); // ensure castable without cost
+  useSkillWrapper(a, 'X1');
+  notify('Debug Secret', '#ffaa00');
+}
+function waveKillVFX(){
+  st.effects.push({kind:'impact',x:DESIGN_W/2,y:DESIGN_H/2,color:'#ff3366',life:1000,max:1000});
+}
+```
+
+**Hook these:**
+
+```js
+// when you spawn/advance a wave:
+dbgWaveStart();
+
+// in your main tick:
+dbgTick(st.dt);
+```
+
+This mirrors your “Debug Skills V2.3 + Stage/Wave Scaling — Patch” doc’s escalation/timers and visibility notes .
+
+## 7) Keep Wave-10 boss rule & stage pill (optional visibility)
+
+Your DOM already has a Stage/Wave pill; the CSS block `#stagePill { display:none }` hides it. If you want it visible again, delete that rule and update it on tick:
+
+```js
+function updateStagePill(){
+  const el = document.getElementById('stagePill');
+  if(el) el.textContent = `Stage ${st.stage} • Wave ${st.wave}/${st.wavesPerStage} • Kills ${st.kills}`;
+}
+```
+
+(You can keep it hidden if you prefer the minimalist HUD.)
+
+---
+
+# Sanity checks (quick tests)
+
+1. **Bag closed on boot** — Load the file: the playfield should be clear. Toggle Bag with the dock buttons.
+2. **Boss kill ends wave** — Use QA to “Skip to Boss”, reduce HP to 0: boss should despawn immediately and wave/stage should advance.
+3. **Projectiles** — Shooters fire regularly; melee occasionally throw knives.
+4. **DebugSkills v2.3** — Idle during a wave: after \~10–20s you’ll see probes; then a Secret burst, and at \~30–40s a red X + WaveKill if still stuck.
+5. **No notification spam** — Toasts cap at 6; older ones get pruned.
+
+---
+
+If you want, I can apply these patches directly to your **`no skills.html`** now and send back a single fixed file (with boss 1000/100/100, projectile mobs, DebugSkills v2.3, bag closed, stat bars hidden, and the `domSprites` guard) — just confirm whether you want the Stage/Wave pill visible or hidden, and whether DebugSkills should be **always on** or **only when the game detects a stuck wave**.
