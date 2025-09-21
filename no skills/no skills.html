@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>No Skills Mode</title>
+  <style>
+    :root {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: #f5f5f5;
+      background: #111;
+    }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 20%, #1f1f24, #0b0b0d 60%);
+      overflow: hidden;
+    }
+    #wrap {
+      position: relative;
+      width: 960px;
+      height: 540px;
+      margin: 24px auto;
+      border: 2px solid #353545;
+      border-radius: 10px;
+      background: #050507;
+      overflow: hidden;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: linear-gradient(#04070f, #070912 60%, #04070f);
+    }
+    #domSprites {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    #notifWrap {
+      position: absolute;
+      left: 16px;
+      bottom: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+      font-size: 14px;
+    }
+    .toast {
+      padding: 6px 10px;
+      background: rgba(18, 18, 22, 0.85);
+      border-left: 3px solid #ffaa00;
+      border-radius: 4px;
+      color: #fff;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+      transition: opacity 0.35s;
+    }
+    #stagePill {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(20, 20, 32, 0.7);
+      font-size: 13px;
+      letter-spacing: 0.2px;
+    }
+    .bag-overlay {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 300px;
+      background: rgba(15, 15, 24, 0.98);
+      transform: translateX(102%);
+      transition: transform 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .bag-overlay.open {
+      transform: translateX(0);
+    }
+    .bag-header {
+      padding: 16px;
+      font-weight: 600;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: #9aa5ff;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .bag-nav {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      padding: 12px;
+      gap: 8px;
+    }
+    .bag-nav-item {
+      padding: 8px;
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border: none;
+      border-radius: 6px;
+      color: #d7dcff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .bag-nav-item.active {
+      background: linear-gradient(135deg, #5865f2, #8b5cf6);
+    }
+    .bag-tabs {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px 24px;
+      font-size: 13px;
+      color: #c6c9dd;
+    }
+    .bag-tab {
+      display: none;
+    }
+    .bag-tab.active {
+      display: block;
+    }
+    .btn-dock {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      display: flex;
+      gap: 8px;
+    }
+    .dock-btn {
+      padding: 10px 16px;
+      background: rgba(18, 18, 24, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #e5e7ff;
+      border-radius: 6px;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      font-size: 12px;
+      transition: transform 0.2s;
+    }
+    .dock-btn:hover {
+      transform: translateY(-2px);
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="field" width="960" height="540"></canvas>
+    <aside id="inventory" class="bag-overlay">
+      <div class="bag-header">Loadout</div>
+      <nav class="bag-nav">
+        <button class="bag-nav-item active" data-tab="items">Items</button>
+        <button class="bag-nav-item" data-tab="skills">Skills</button>
+        <button class="bag-nav-item" data-tab="settings">Settings</button>
+      </nav>
+      <section class="bag-tabs">
+        <div class="bag-tab active" data-tab="items">
+          <p>No items equipped.</p>
+        </div>
+        <div class="bag-tab" data-tab="skills">
+          <p>Skills disabled in this mode.</p>
+        </div>
+        <div class="bag-tab" data-tab="settings">
+          <p>Adjust your preferences.</p>
+        </div>
+      </section>
+    </aside>
+    <div id="domSprites"></div>
+    <div id="notifWrap"></div>
+    <div id="stagePill"></div>
+    <div class="btn-dock">
+      <button class="dock-btn" data-action="bag">Bag</button>
+      <button class="dock-btn" data-action="skip">Skip Wave</button>
+      <button class="dock-btn" data-action="boss">Spawn Boss</button>
+    </div>
+  </div>
+  <script>
+    const DESIGN_W = 960;
+    const DESIGN_H = 540;
+    const canvas = document.getElementById('field');
+    const ctx = canvas.getContext('2d');
+
+    const st = {
+      lastTime: performance.now(),
+      dt: 0,
+      bagOpen: false,
+      stage: 1,
+      wave: 1,
+      wavesPerStage: 10,
+      enemies: [],
+      eShots: [],
+      shots: [],
+      players: [],
+      effects: [],
+      kills: 0,
+      bossAlive: false,
+      bossHP: 0,
+      bossMax: 0
+    };
+
+    function leader() {
+      return st.players.find(p => !p.isDefeated) || null;
+    }
+
+    function notifWrap() {
+      let wrap = document.getElementById('notifWrap');
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'notifWrap';
+        const root = document.getElementById('wrap');
+        (root || document.body).appendChild(wrap);
+      }
+      return wrap;
+    }
+
+    function notify(msg, color) {
+      const wrap = notifWrap();
+      const d = document.createElement('div');
+      d.className = 'toast';
+      if (color) d.style.color = color;
+      d.textContent = msg;
+      wrap.appendChild(d);
+
+      while (wrap.children.length > 6) wrap.firstChild.remove();
+
+      setTimeout(() => {
+        d.style.transition = 'opacity .35s';
+        d.style.opacity = 0;
+        setTimeout(() => d.remove(), 400);
+      }, 1400);
+    }
+
+    function getDomSprites() {
+      let d = document.getElementById('domSprites');
+      if (!d) {
+        d = document.createElement('div');
+        d.id = 'domSprites';
+        d.style.cssText = 'position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none';
+        const wrap = document.getElementById('wrap');
+        if (wrap) wrap.appendChild(d); else document.body.appendChild(d);
+      }
+      return d;
+    }
+
+    function openBag(tab = 'items') {
+      const inv = document.getElementById('inventory');
+      inv.classList.add('open');
+      st.bagOpen = true;
+      selectBagTab(tab);
+    }
+
+    function closeBag() {
+      const inv = document.getElementById('inventory');
+      inv.classList.remove('open');
+      st.bagOpen = false;
+    }
+
+    function toggleBag(tab = 'items') {
+      if (st.bagOpen) {
+        closeBag();
+      } else {
+        openBag(tab);
+      }
+    }
+
+    function selectBagTab(tab) {
+      document.querySelectorAll('.bag-nav-item').forEach(btn => {
+        const active = btn.dataset.tab === tab;
+        btn.classList.toggle('active', active);
+      });
+      document.querySelectorAll('.bag-tab').forEach(panel => {
+        const active = panel.dataset.tab === tab;
+        panel.classList.toggle('active', active);
+      });
+    }
+
+    document.querySelectorAll('.bag-nav-item').forEach(btn => {
+      btn.addEventListener('click', () => selectBagTab(btn.dataset.tab));
+    });
+
+    document.querySelectorAll('.dock-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action === 'bag') toggleBag('items');
+        if (action === 'skip') forceWaveKill();
+        if (action === 'boss') spawnBossForStage();
+      });
+    });
+
+    closeBag();
+
+    function updateStagePill() {
+      const el = document.getElementById('stagePill');
+      if (!el) return;
+      el.textContent = `Stage ${st.stage} • Wave ${st.wave}/${st.wavesPerStage} • Kills ${st.kills}`;
+    }
+
+    function makeId(prefix = 'id') {
+      return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36)}`;
+    }
+
+    function spawnEnemy(role = 'melee') {
+      const y = laneY(Math.floor(Math.random() * 3));
+      const enemy = {
+        id: makeId('mob'),
+        kind: 'mob',
+        role,
+        x: DESIGN_W + Math.random() * 120,
+        y,
+        hp: 120,
+        max: 120,
+        atk: 24,
+        def: 12,
+        vx: -0.12 - Math.random() * 0.08,
+        fireCD: 800 + Math.random() * 600
+      };
+      st.enemies.push(enemy);
+    }
+
+    function laneY(idx) {
+      const lanes = [DESIGN_H * 0.3, DESIGN_H * 0.5, DESIGN_H * 0.7];
+      return lanes[idx] || DESIGN_H * 0.5;
+    }
+
+    function spawnWave() {
+      st.bossAlive = false;
+      const bossWave = st.wave === st.wavesPerStage;
+      if (bossWave) {
+        spawnBossForStage();
+      } else {
+        const shooters = Math.max(1, Math.floor(st.wave / 2));
+        for (let i = 0; i < 3 + st.wave; i++) {
+          spawnEnemy(i < shooters ? 'shooter' : 'melee');
+        }
+      }
+      dbgWaveStart();
+      notify(`Wave ${st.wave} incoming`, '#8b5cf6');
+    }
+
+    function spawnBossForStage() {
+      const y = laneY(1);
+      const boss = {
+        id: 'boss_' + Date.now(),
+        kind: 'boss',
+        role: 'boss',
+        x: DESIGN_W + 80,
+        y,
+        hp: 1000,
+        max: 1000,
+        atk: 100,
+        def: 100,
+        vx: -0.18,
+        fireCD: 1200,
+        behavior: 'boss_pattern',
+        rageTrigger: 0.35,
+        rageMode: false,
+        skillCD: 1500
+      };
+      st.enemies.push(boss);
+      st.bossAlive = true;
+      st.bossHP = boss.hp;
+      st.bossMax = boss.max;
+      dbgWaveStart();
+      notify('Boss has appeared!', '#ff3366');
+    }
+
+    function onEnemyKilled(enemy) {
+      const idx = st.enemies.indexOf(enemy);
+      if (idx >= 0) st.enemies.splice(idx, 1);
+      st.kills += 1;
+
+      if (enemy.kind === 'boss') {
+        st.bossAlive = false;
+        st.bossHP = 0;
+        if (st.wave === st.wavesPerStage) {
+          st.stage += 1;
+          st.wave = 1;
+        } else {
+          st.wave += 1;
+        }
+        spawnWave();
+      }
+    }
+
+    function forceWaveKill() {
+      waveKillVFX();
+      st.enemies.slice().forEach(e => {
+        e.hp = 0;
+        onEnemyKilled(e);
+      });
+    }
+
+    function fireEnemyBullet(enemy, speed = 320, dmg = 14) {
+      const L = leader();
+      if (!L) return;
+      const dx = L.x - enemy.x;
+      const dy = L.y - enemy.y;
+      const mag = Math.hypot(dx, dy) || 1;
+      st.eShots.push({
+        x: enemy.x - 18,
+        y: enemy.y - 30,
+        vx: speed * (dx / mag),
+        vy: speed * (dy / mag),
+        dmg,
+        life: 2200,
+        w: 24,
+        h: 24,
+        color: '#ffbb66'
+      });
+      enemy._justFired = true;
+    }
+
+    function tickEnemyShooting(enemy, dt) {
+      enemy.fireCD = (enemy.fireCD ?? (800 + Math.random() * 600)) - dt * 1000;
+      if (enemy.fireCD <= 0) {
+        const dmg = enemy.kind === 'boss' ? 26 : 12;
+        fireEnemyBullet(enemy, 360, dmg);
+        enemy.fireCD = (enemy.kind === 'boss' ? 600 : 1000) + Math.random() * 400;
+      }
+    }
+
+    function updateEnemies(dt) {
+      for (const enemy of [...st.enemies]) {
+        if (enemy.hp <= 0) {
+          onEnemyKilled(enemy);
+          continue;
+        }
+        enemy.x += enemy.vx * dt * 1000;
+        if (enemy.role === 'shooter' || enemy.kind === 'boss') {
+          tickEnemyShooting(enemy, dt);
+        } else if (enemy.role === 'melee' && Math.random() < 0.003) {
+          fireEnemyBullet(enemy, 300, 10);
+        }
+        if (enemy.x < -80) {
+          enemy.x = -80;
+        }
+      }
+
+      if (st.enemies.length === 0 && !st.bossAlive) {
+        st.wave += 1;
+        if (st.wave > st.wavesPerStage) {
+          st.stage += 1;
+          st.wave = 1;
+        }
+        spawnWave();
+      }
+    }
+
+    function updateShots(dt) {
+      for (const shot of [...st.shots]) {
+        if (shot.homing) {
+          const target = st.enemies.find(e => e.hp > 0);
+          if (target) {
+            const dx = target.x - shot.x;
+            const dy = target.y - shot.y;
+            const mag = Math.hypot(dx, dy) || 1;
+            const speed = Math.hypot(shot.vx, shot.vy);
+            shot.vx = speed * (dx / mag);
+            shot.vy = speed * (dy / mag);
+          }
+        }
+        shot.x += shot.vx * dt;
+        shot.y += shot.vy * dt;
+        shot.life -= dt * 1000;
+        if (shot.life <= 0 || shot.x > DESIGN_W + 80 || shot.y < -80 || shot.y > DESIGN_H + 80) {
+          st.shots.splice(st.shots.indexOf(shot), 1);
+          continue;
+        }
+        for (const enemy of st.enemies) {
+          if (enemy.hp <= 0) continue;
+          if (Math.abs(enemy.x - shot.x) < 24 && Math.abs(enemy.y - shot.y) < 24) {
+            enemy.hp -= shot.dmg;
+            st.shots.splice(st.shots.indexOf(shot), 1);
+            if (enemy.hp <= 0) {
+              onEnemyKilled(enemy);
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    function updateEnemyShots(dt) {
+      const hero = leader();
+      for (const shot of [...st.eShots]) {
+        shot.x += shot.vx * dt;
+        shot.y += shot.vy * dt;
+        shot.life -= dt * 1000;
+        if (shot.life <= 0) {
+          st.eShots.splice(st.eShots.indexOf(shot), 1);
+          continue;
+        }
+        if (hero && Math.abs(hero.x - shot.x) < 20 && Math.abs(hero.y - shot.y) < 30) {
+          hero.hp -= shot.dmg;
+          st.eShots.splice(st.eShots.indexOf(shot), 1);
+          notify(`Hit for ${shot.dmg}`, '#ff6666');
+          if (hero.hp <= 0) {
+            hero.isDefeated = true;
+            notify('Leader defeated', '#ff3366');
+          }
+        }
+      }
+    }
+
+    function updateEffects(dt) {
+      for (const fx of [...st.effects]) {
+        fx.life -= dt * 1000;
+        if (fx.life <= 0) st.effects.splice(st.effects.indexOf(fx), 1);
+      }
+    }
+
+    const dbg = {
+      armed: true,
+      waveStart: 0,
+      step: 0,
+      tProbe: 0,
+      probesFired: 0,
+      lastHP: 0,
+      stableT: 0,
+      unlockMin: 10000,
+      unlockMax: 20000,
+      hardcapMin: 30000,
+      hardcapMax: 40000
+    };
+
+    function totalEnemyHP() {
+      return st.enemies.reduce((sum, e) => sum + Math.max(0, e.hp), 0);
+    }
+
+    function dbgWaveStart() {
+      dbg.waveStart = performance.now();
+      dbg.step = 0;
+      dbg.tProbe = 0;
+      dbg.probesFired = 0;
+      dbg.lastHP = totalEnemyHP();
+      dbg.stableT = 0;
+      dbg._unlock = undefined;
+      dbg._hardcap = undefined;
+      dbg._secretT = undefined;
+    }
+
+    function dbgTick(dt) {
+      if (!dbg.armed) return;
+
+      st.players.forEach(p => p._forceVisible = true);
+
+      const hp = totalEnemyHP();
+      if (Math.abs(hp - dbg.lastHP) <= 0.01) {
+        dbg.stableT += dt * 1000;
+      } else {
+        dbg.stableT = 0;
+      }
+      dbg.lastHP = hp;
+
+      const t = performance.now() - dbg.waveStart;
+      const unlock = dbg._unlock ??= (dbg.unlockMin + Math.random() * (dbg.unlockMax - dbg.unlockMin));
+      const hardcap = dbg._hardcap ??= (dbg.hardcapMin + Math.random() * (dbg.hardcapMax - dbg.hardcapMin));
+
+      if (dbg.step === 0 && (t >= unlock || dbg.stableT >= 1500)) {
+        if (dbg.probesFired < 3) {
+          fireHomingProbe(30);
+          dbg.probesFired++;
+          dbg.tProbe = performance.now();
+          if (dbg.probesFired >= 3) dbg.step = 1;
+        } else {
+          dbg.step = 1;
+        }
+      }
+
+      if (dbg.step === 1 && (dbg.stableT >= 1500 || (performance.now() - dbg.tProbe) >= 10000)) {
+        castA1SecretFree();
+        dbg.step = 2;
+        dbg._secretT = performance.now();
+      }
+
+      if (dbg.step <= 2 && (t >= hardcap || dbg.stableT >= 1500 || (dbg._secretT && (performance.now() - dbg._secretT) >= 5000))) {
+        waveKillVFX();
+        st.enemies.slice().forEach(e => {
+          e.hp = 0;
+          onEnemyKilled(e);
+        });
+        dbg.step = 3;
+      }
+    }
+
+    function fireHomingProbe(dmg) {
+      const L = leader();
+      if (!L) return;
+      const target = st.enemies.find(e => e.hp > 0);
+      if (!target) return;
+      const dx = target.x - L.x;
+      const dy = target.y - L.y;
+      const mag = Math.hypot(dx, dy) || 1;
+      st.shots.push({
+        x: L.x + 20,
+        y: L.y - 40,
+        vx: 420 * (dx / mag),
+        vy: 420 * (dy / mag),
+        dmg,
+        life: 1600,
+        homing: true,
+        ownerId: 'ally',
+        color: '#ffaa00'
+      });
+      notify('Debug Probe', '#ffaa00');
+    }
+
+    function useSkillWrapper(player, skillId) {
+      if (skillId === 'X1') {
+        st.effects.push({ kind: 'slash', x: player.x + 30, y: player.y, color: '#ff66cc', life: 600, max: 600 });
+        st.enemies.forEach(e => e.hp -= 180);
+      }
+    }
+
+    function castA1SecretFree() {
+      const a = st.players.find(p => p.id === 'A1' && !p.isDefeated);
+      if (!a) return;
+      a.secretGauge = a.secretMax;
+      a.hp = Math.max(1, a.hp);
+      useSkillWrapper(a, 'X1');
+      notify('Debug Secret', '#ffaa00');
+    }
+
+    function waveKillVFX() {
+      st.effects.push({ kind: 'impact', x: DESIGN_W / 2, y: DESIGN_H / 2, color: '#ff3366', life: 1000, max: 1000 });
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = '#1a1a23';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (const enemy of st.enemies) {
+        ctx.fillStyle = enemy.kind === 'boss' ? '#ff5577' : enemy.role === 'shooter' ? '#fbc531' : '#4cd137';
+        ctx.beginPath();
+        ctx.arc(enemy.x, enemy.y, enemy.kind === 'boss' ? 28 : 16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#222';
+        ctx.fillRect(enemy.x - 20, enemy.y - 26, 40, 4);
+        ctx.fillStyle = '#f66';
+        ctx.fillRect(enemy.x - 20, enemy.y - 26, 40 * Math.max(0, enemy.hp) / (enemy.max || 1), 4);
+      }
+
+      for (const shot of st.shots) {
+        ctx.fillStyle = shot.color || '#99f';
+        ctx.fillRect(shot.x - 3, shot.y - 3, 6, 6);
+      }
+
+      for (const shot of st.eShots) {
+        ctx.fillStyle = shot.color || '#ffbb66';
+        ctx.fillRect(shot.x - 3, shot.y - 3, 6, 6);
+      }
+
+      const hero = leader();
+      if (hero) {
+        ctx.fillStyle = '#5865f2';
+        ctx.fillRect(hero.x - 12, hero.y - 28, 24, 56);
+        ctx.fillStyle = '#0d0d14';
+        ctx.fillRect(hero.x - 18, hero.y - 40, 36, 6);
+        ctx.fillStyle = '#58f29c';
+        ctx.fillRect(hero.x - 18, hero.y - 40, 36 * (hero.hp / hero.maxHp), 6);
+      }
+
+      for (const fx of st.effects) {
+        const alpha = Math.max(0, fx.life / (fx.max || 1));
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = fx.color || '#fff';
+        ctx.beginPath();
+        ctx.arc(fx.x, fx.y, 80 * alpha, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function loop(time) {
+      st.dt = Math.min(0.05, (time - st.lastTime) / 1000);
+      st.lastTime = time;
+      updateStagePill();
+      updateEnemies(st.dt);
+      updateShots(st.dt);
+      updateEnemyShots(st.dt);
+      updateEffects(st.dt);
+      dbgTick(st.dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    function init() {
+      getDomSprites();
+      st.players.push({
+        id: 'A1',
+        x: DESIGN_W * 0.2,
+        y: DESIGN_H * 0.6,
+        hp: 420,
+        maxHp: 420,
+        secretGauge: 0,
+        secretMax: 100,
+        isDefeated: false
+      });
+      st.wave = 1;
+      spawnWave();
+      requestAnimationFrame(loop);
+    }
+
+    init();
+  </script>
+</body>
+</html>
